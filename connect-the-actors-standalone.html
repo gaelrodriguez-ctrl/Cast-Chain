@@ -1,0 +1,1209 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<title>Cast Link</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>html,body{margin:0;padding:0;background:#111017;}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ============================================================
+// DATA LAYER
+// ============================================================
+
+const MOCK_MODE = false;
+const TMDB_API_KEY = "c37338f3f66dedfc958a4d5a3344c2ab";
+const TMDB_BASE = "https://api.themoviedb.org/3";
+const TMDB_IMG = "https://image.tmdb.org/t/p/w185";
+
+const LS_SCORES_KEY = "cta_scores";
+const LS_DAILY_PREFIX = "cta_daily_";
+const LS_SOUND_KEY = "cta_sound_on";
+
+const MOCK_ACTORS = {
+  a1: { name: "Tom Holland", credits: ["m1", "m2"] },
+  a2: { name: "Zendaya", credits: ["m1", "m3"] },
+  a3: { name: "Robert Downey Jr.", credits: ["m1", "m4"] },
+  a4: { name: "Chris Evans", credits: ["m4", "m5"] },
+  a5: { name: "Chris Pratt", credits: ["m4", "m6"] },
+  a6: { name: "Scarlett Johansson", credits: ["m4", "m7"] },
+  a7: { name: "Bryce Dallas Howard", credits: ["m6", "m8"] },
+  a8: { name: "Anthony Mackie", credits: ["m5", "m9"] },
+  a9: { name: "Sebastian Stan", credits: ["m5", "m9"] },
+  a10: { name: "Willem Dafoe", credits: ["m2", "m10"] },
+  a11: { name: "Timothée Chalamet", credits: ["m10", "m11"] },
+  a12: { name: "Florence Pugh", credits: ["m11", "m3"] },
+};
+
+const MOCK_TITLES = {
+  m1: { title: "Spider-Man: Homecoming", mediaType: "movie", cast: ["a1", "a2", "a3"] },
+  m2: { title: "The Odyssey", mediaType: "movie", cast: ["a1", "a10"] },
+  m3: { title: "Dune: Part Two", mediaType: "movie", cast: ["a2", "a12"] },
+  m4: { title: "Avengers: Endgame", mediaType: "movie", cast: ["a3", "a4", "a5", "a6"] },
+  m5: { title: "Captain America: Civil War", mediaType: "movie", cast: ["a4", "a8", "a9"] },
+  m6: { title: "Jurassic World", mediaType: "movie", cast: ["a5", "a7"] },
+  m7: { title: "Black Widow", mediaType: "movie", cast: ["a6"] },
+  m8: { title: "Pete's Dragon", mediaType: "movie", cast: ["a7"] },
+  m9: { title: "The Falcon and the Winter Soldier", mediaType: "tv", cast: ["a8", "a9"] },
+  m10: { title: "Spider-Man: No Way Home", mediaType: "movie", cast: ["a1", "a10", "a11"] },
+  m11: { title: "Dune", mediaType: "movie", cast: ["a11", "a12"] },
+};
+
+function delay(ms) {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
+function isAdultCredit(item) {
+  return item.media_type === "movie" && item.adult === true;
+}
+
+function hasRecognizableEnglishWork(person) {
+  return (person.known_for || []).some((k) => k.original_language === "en" && !k.adult);
+}
+
+async function getActorCredits(actorId, limit = 20) {
+  if (MOCK_MODE) {
+    await delay(120);
+    const actor = MOCK_ACTORS[actorId];
+    return actor.credits.map((tid) => ({
+      id: tid,
+      title: MOCK_TITLES[tid].title,
+      mediaType: MOCK_TITLES[tid].mediaType,
+      year: "",
+      image: null,
+    }));
+  }
+  const res = await fetch(`${TMDB_BASE}/person/${actorId}/combined_credits?api_key=${TMDB_API_KEY}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.status_message || `TMDb error (${res.status})`);
+
+  return (data.cast || [])
+    .filter((c) => c.poster_path && !isAdultCredit(c) && (c.media_type === "movie" || c.media_type === "tv"))
+    .sort((a, b) => (b.vote_count || 0) - (a.vote_count || 0))
+    .slice(0, limit)
+    .map((c) => ({
+      id: c.id,
+      mediaType: c.media_type,
+      title: c.title || c.name,
+      year: (c.release_date || c.first_air_date || "").slice(0, 4),
+      image: `${TMDB_IMG}${c.poster_path}`,
+    }));
+}
+
+async function getCastForTitle(titleId, mediaType, limit = 40, requiredActorId = null) {
+  if (MOCK_MODE) {
+    await delay(120);
+    const title = MOCK_TITLES[titleId];
+    return title.cast.map((aid) => ({ id: aid, name: MOCK_ACTORS[aid].name, character: "", image: null }));
+  }
+
+  function ensureRequired(fullList, visibleList) {
+    if (requiredActorId == null || visibleList.some((c) => c.id === requiredActorId)) return visibleList;
+    const found = fullList.find((c) => c.id === requiredActorId);
+    if (!found) return visibleList;
+    return [found, ...visibleList.slice(0, Math.max(0, limit - 1))];
+  }
+
+  if (mediaType === "movie") {
+    const res = await fetch(`${TMDB_BASE}/movie/${titleId}/credits?api_key=${TMDB_API_KEY}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.status_message || `TMDb error (${res.status})`);
+    const mapAll = (data.cast || []).map((c) => ({
+      id: c.id,
+      name: c.name,
+      character: c.character,
+      image: c.profile_path ? `${TMDB_IMG}${c.profile_path}` : null,
+    }));
+    const visible = mapAll.slice(0, limit);
+    return ensureRequired(mapAll, visible);
+  }
+
+  const res = await fetch(`${TMDB_BASE}/tv/${titleId}/aggregate_credits?api_key=${TMDB_API_KEY}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.status_message || `TMDb error (${res.status})`);
+  const mapAll = (data.cast || [])
+    .slice()
+    .sort((a, b) => (b.total_episode_count || 0) - (a.total_episode_count || 0))
+    .map((c) => ({
+      id: c.id,
+      name: c.name,
+      character: c.roles && c.roles[0] ? c.roles[0].character : "",
+      image: c.profile_path ? `${TMDB_IMG}${c.profile_path}` : null,
+    }));
+  const visible = mapAll.slice(0, limit);
+  return ensureRequired(mapAll, visible);
+}
+
+async function getRandomActorPair(rng = Math.random, pages = [1, 2, 3]) {
+  if (MOCK_MODE) {
+    const ids = Object.keys(MOCK_ACTORS);
+    const a = ids[Math.floor(rng() * ids.length)];
+    let b = ids[Math.floor(rng() * ids.length)];
+    while (b === a) b = ids[Math.floor(rng() * ids.length)];
+    return {
+      start: { id: a, name: MOCK_ACTORS[a].name, image: null },
+      target: { id: b, name: MOCK_ACTORS[b].name, image: null },
+    };
+  }
+
+  const results = await Promise.all(
+    pages.map((p) => fetch(`${TMDB_BASE}/person/popular?api_key=${TMDB_API_KEY}&page=${p}`).then((r) => r.json()))
+  );
+
+  const people = results
+    .flatMap((d) => d.results || [])
+    .filter((p) => p.known_for_department === "Acting" && !(p.known_for || []).some((k) => k.adult) && hasRecognizableEnglishWork(p));
+
+  if (people.length < 2) throw new Error("Not enough eligible actors came back from TMDb — try again.");
+
+  const i = Math.floor(rng() * people.length);
+  let j = Math.floor(rng() * people.length);
+  while (j === i) j = Math.floor(rng() * people.length);
+
+  return {
+    start: { id: people[i].id, name: people[i].name, image: people[i].profile_path ? `${TMDB_IMG}${people[i].profile_path}` : null },
+    target: { id: people[j].id, name: people[j].name, image: people[j].profile_path ? `${TMDB_IMG}${people[j].profile_path}` : null },
+  };
+}
+
+// ============================================================
+// DIFFICULTY
+// ============================================================
+
+const DIFFICULTIES = [
+  { id: "easy", label: "Easy" },
+  { id: "normal", label: "Normal" },
+  { id: "medium", label: "Medium" },
+  { id: "hard", label: "Hard" },
+  { id: "impossible", label: "Impossible" },
+];
+
+const DIFFICULTY_SETTINGS = {
+  easy: { pages: [1, 2], requireDirect: true, maxAttempts: 6, scoreMultiplier: 0.8 },
+  normal: { pages: [1, 2, 3, 4, 5], requireDirect: false, maxAttempts: 4, scoreMultiplier: 1.0 },
+  medium: { pages: [5, 6, 7, 8, 9, 10], requireDirect: false, maxAttempts: 5, scoreMultiplier: 1.2 },
+  hard: { pages: [11, 12, 13, 14, 15, 16], requireDirect: false, maxAttempts: 3, scoreMultiplier: 1.5 },
+  impossible: { pages: [20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30], requireDirect: false, maxAttempts: 1, scoreMultiplier: 2.0 },
+};
+
+async function findValidPair({ seed = null, difficulty = "normal" } = {}) {
+  const settings = DIFFICULTY_SETTINGS[difficulty] || DIFFICULTY_SETTINGS.normal;
+  let lastAttempt = null;
+
+  for (let attempt = 0; attempt < settings.maxAttempts; attempt++) {
+    const rng = seed ? rngFromSeed(`${seed}-${difficulty}-${attempt}`) : Math.random;
+    const pair = await getRandomActorPair(rng, settings.pages);
+    const [startCredits, targetCredits] = await Promise.all([
+      getActorCredits(pair.start.id, 12),
+      getActorCredits(pair.target.id, 12),
+    ]);
+    lastAttempt = { pair, startCredits, targetCredits };
+
+    const startKeys = new Set(startCredits.map((c) => `${c.mediaType}-${c.id}`));
+    const isDirect = targetCredits.some((c) => startKeys.has(`${c.mediaType}-${c.id}`));
+    if (isDirect) return lastAttempt;
+    if (settings.requireDirect) continue;
+
+    if (!MOCK_MODE) {
+      const startCostars = new Set();
+      for (const t of startCredits.slice(0, 4)) {
+        const cast = await getCastForTitle(t.id, t.mediaType, 15);
+        cast.forEach((c) => startCostars.add(c.id));
+      }
+      const targetCostars = new Set();
+      for (const t of targetCredits.slice(0, 4)) {
+        const cast = await getCastForTitle(t.id, t.mediaType, 15);
+        cast.forEach((c) => targetCostars.add(c.id));
+      }
+      if ([...startCostars].some((id) => targetCostars.has(id))) return lastAttempt;
+    } else {
+      return lastAttempt;
+    }
+  }
+  return lastAttempt;
+}
+
+// ============================================================
+// SEEDED RANDOM
+// ============================================================
+
+function hashString(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return h >>> 0;
+}
+
+function mulberry32(seed) {
+  let a = seed;
+  return function () {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function rngFromSeed(seedStr) {
+  return mulberry32(hashString(seedStr));
+}
+
+function todayStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// ============================================================
+// LOCAL STORAGE
+// ============================================================
+
+function loadScores() {
+  try {
+    return JSON.parse(localStorage.getItem(LS_SCORES_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+function saveScoreEntry(entry) {
+  try {
+    const arr = loadScores();
+    arr.push(entry);
+    localStorage.setItem(LS_SCORES_KEY, JSON.stringify(arr.slice(-200)));
+  } catch {}
+}
+function getPersonalBest() {
+  const arr = loadScores();
+  if (!arr.length) return null;
+  return arr.reduce((m, e) => (e.score > m.score ? e : m), arr[0]);
+}
+function loadDailyResult(dateStr) {
+  try {
+    const raw = localStorage.getItem(LS_DAILY_PREFIX + dateStr);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+function saveDailyResult(dateStr, entry) {
+  try {
+    localStorage.setItem(LS_DAILY_PREFIX + dateStr, JSON.stringify(entry));
+  } catch {}
+}
+function loadSoundPref() {
+  try {
+    const v = localStorage.getItem(LS_SOUND_KEY);
+    return v === null ? true : v === "1";
+  } catch {
+    return true;
+  }
+}
+function saveSoundPref(on) {
+  try {
+    localStorage.setItem(LS_SOUND_KEY, on ? "1" : "0");
+  } catch {}
+}
+
+// ============================================================
+// SOUND
+// ============================================================
+
+let audioCtx = null;
+function getAudioCtx() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    audioCtx = new AC();
+  }
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  return audioCtx;
+}
+function beep({ freq = 440, duration = 0.12, type = "sine", gain = 0.15, when = 0 }) {
+  const ctx = getAudioCtx();
+  if (!ctx) return;
+  try {
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    osc.connect(g);
+    g.connect(ctx.destination);
+    const startTime = ctx.currentTime + when;
+    g.gain.setValueAtTime(gain, startTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+    osc.start(startTime);
+    osc.stop(startTime + duration + 0.02);
+  } catch {}
+}
+const SFX = {
+  tick: () => beep({ freq: 520, duration: 0.09, type: "square", gain: 0.12 }),
+  go: () => beep({ freq: 780, duration: 0.22, type: "square", gain: 0.15 }),
+  click: () => beep({ freq: 340, duration: 0.06, type: "sine", gain: 0.1 }),
+  rewind: () => beep({ freq: 220, duration: 0.1, type: "sawtooth", gain: 0.1 }),
+  win: () => [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => beep({ freq: f, duration: 0.18, type: "triangle", gain: 0.13, when: i * 0.09 })),
+  lose: () => [300, 220, 160].forEach((f, i) => beep({ freq: f, duration: 0.22, type: "sawtooth", gain: 0.12, when: i * 0.12 })),
+};
+
+// ============================================================
+// SCORING
+// ============================================================
+const MAX_REWINDS = 10;
+const REWIND_PENALTY = 150;
+const BASE_SCORE = 5000;
+const TIME_PENALTY_PER_SEC = 40;
+
+function computeScore(seconds, rewinds, difficulty) {
+  const raw = BASE_SCORE - seconds * TIME_PENALTY_PER_SEC - rewinds * REWIND_PENALTY;
+  const multiplier = (DIFFICULTY_SETTINGS[difficulty] || DIFFICULTY_SETTINGS.normal).scoreMultiplier;
+  return Math.max(0, Math.round(raw * multiplier));
+}
+
+// ============================================================
+// STYLE
+// ============================================================
+
+const GLOBAL_CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&display=swap');
+
+* { box-sizing: border-box; }
+
+.cta-btn { transition: transform .15s ease, filter .15s ease, box-shadow .15s ease; }
+.cta-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+.cta-btn:active { transform: translateY(0); filter: brightness(0.95); }
+
+.cta-card { transition: transform .2s ease; }
+.cta-card:hover { transform: translateY(-5px) scale(1.015); }
+.cta-card:hover .cta-card-frame { box-shadow: 0 10px 26px rgba(232,172,61,0.3), 0 0 0 1px #E8AC3D; }
+
+.cta-chip-enter { animation: ctaChipIn .3s cubic-bezier(.2,.8,.3,1); }
+@keyframes ctaChipIn { from { opacity: 0; transform: translateX(-10px) scale(0.9); } to { opacity: 1; transform: none; } }
+
+.cta-score-pop { display: inline-block; animation: ctaScorePop .6s cubic-bezier(.34,1.56,.64,1); }
+@keyframes ctaScorePop { 0% { transform: scale(.3); opacity: 0; } 70% { transform: scale(1.1); } 100% { transform: scale(1); opacity: 1; } }
+
+.cta-count-pop { display: inline-block; animation: ctaCountPop .55s cubic-bezier(.34,1.56,.64,1); }
+@keyframes ctaCountPop { 0% { transform: scale(1.7); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+
+.cta-fade-in { animation: ctaFadeIn .35s ease; }
+@keyframes ctaFadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+.cta-title-glow { text-shadow: 0 0 24px rgba(232,172,61,0.4), 0 0 60px rgba(232,172,61,0.12); }
+
+.cta-ambient::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse 60% 40% at 12% -5%, rgba(232,172,61,0.13), transparent 55%),
+    radial-gradient(ellipse 60% 40% at 100% 105%, rgba(79,195,176,0.10), transparent 55%),
+    radial-gradient(ellipse 80% 60% at 50% 50%, transparent 60%, rgba(0,0,0,0.35) 100%);
+}
+.cta-ambient::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.035;
+  background: repeating-linear-gradient(0deg, #fff 0px, #fff 1px, transparent 1px, transparent 3px);
+}
+.cta-content { position: relative; z-index: 1; }
+
+.cta-confetti { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.cta-confetti span {
+  position: absolute;
+  top: -10%;
+  width: 6px;
+  height: 14px;
+  opacity: 0.9;
+  animation: ctaConfettiFall 1.4s ease-in forwards;
+}
+@keyframes ctaConfettiFall {
+  0% { transform: translateY(0) rotate(0deg); opacity: 1; }
+  100% { transform: translateY(220px) rotate(360deg); opacity: 0; }
+}
+
+.cta-ring-track { fill: none; stroke: #332F42; stroke-width: 5; }
+.cta-ring-progress { fill: none; stroke: #E8AC3D; stroke-width: 5; stroke-linecap: round; transition: stroke-dashoffset .68s linear; }
+
+.cta-vs { position: relative; text-align: center; margin: 4px 0 18px; }
+.cta-vs::before, .cta-vs::after { content: ""; position: absolute; top: 50%; width: 42%; height: 1px; background: #332F42; }
+.cta-vs::before { left: 0; }
+.cta-vs::after { right: 0; }
+
+@keyframes cta-spin { to { transform: rotate(360deg); } }
+`;
+
+const COLORS = {
+  bg: "#111017",
+  panel: "#1B1A24",
+  panelAlt: "#211F2C",
+  line: "#332F42",
+  text: "#F3F0E9",
+  textMuted: "#9C97AB",
+  gold: "#E8AC3D",
+  goldDim: "#7A5E28",
+  teal: "#4FC3B0",
+  red: "#E2604F",
+};
+
+function ClapperIcon({ size = 30 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48" fill="none">
+      <rect x="6" y="18" width="36" height="24" rx="3" fill={COLORS.panelAlt} stroke={COLORS.gold} strokeWidth="2" />
+      <path d="M6 18 L12 8 L18 8 L14 18 Z" fill={COLORS.gold} />
+      <path d="M18 18 L24 8 L30 8 L26 18 Z" fill={COLORS.panelAlt} stroke={COLORS.gold} strokeWidth="1.5" />
+      <path d="M30 18 L36 8 L42 8 L38 18 Z" fill={COLORS.gold} />
+      <line x1="6" y1="18" x2="42" y2="18" stroke={COLORS.gold} strokeWidth="2" />
+    </svg>
+  );
+}
+
+function ConfettiBurst() {
+  const pieces = Array.from({ length: 24 }).map((_, i) => {
+    const left = Math.random() * 100;
+    const delay = Math.random() * 0.3;
+    const color = [COLORS.gold, COLORS.teal, COLORS.text][i % 3];
+    return (
+      <span key={i} style={{ left: `${left}%`, background: color, animationDelay: `${delay}s`, transform: `rotate(${Math.random() * 360}deg)` }} />
+    );
+  });
+  return <div className="cta-confetti">{pieces}</div>;
+}
+
+function CountdownRing({ value, max = 3 }) {
+  const size = 130;
+  const stroke = 5;
+  const r = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * r;
+  const frac = value === 0 ? 1 : (max - value + 1) / (max + 1);
+  const offset = circumference * (1 - frac);
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ transform: "rotate(-90deg)" }}>
+      <circle className="cta-ring-track" cx={size / 2} cy={size / 2} r={r} />
+      <circle
+        className="cta-ring-progress"
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        strokeDasharray={circumference}
+        strokeDashoffset={offset}
+      />
+    </svg>
+  );
+}
+
+function Sprocket() {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-evenly", padding: "0 2px", marginBottom: 3 }}>
+      {Array.from({ length: 6 }).map((_, i) => (
+        <div key={i} style={{ width: 4, height: 4, borderRadius: "50%", background: COLORS.line }} />
+      ))}
+    </div>
+  );
+}
+
+function PosterCard({ image, mediaType, title, subtitle, onClick }) {
+  const Tag = onClick ? "button" : "div";
+  const accent = mediaType === "tv" ? COLORS.teal : COLORS.gold;
+  return (
+    <Tag onClick={onClick} className={onClick ? "cta-card" : undefined} style={onClick ? cardBtnReset : { textAlign: "left" }}>
+      <Sprocket />
+      <div className="cta-card-frame" style={{ position: "relative", borderRadius: 6, overflow: "hidden", border: `1px solid ${COLORS.line}`, transition: "box-shadow .2s ease" }}>
+        {image ? (
+          <img src={image} alt="" style={{ width: "100%", aspectRatio: "2 / 3", objectFit: "cover", display: "block" }} />
+        ) : (
+          <div style={{ width: "100%", aspectRatio: "2 / 3", background: COLORS.panelAlt }} />
+        )}
+        <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: accent }} />
+        <div style={{ position: "absolute", inset: 0, background: "linear-gradient(180deg, transparent 60%, rgba(0,0,0,0.55) 100%)" }} />
+      </div>
+      <div style={{ fontSize: 12.5, fontWeight: 600, marginTop: 6, lineHeight: 1.25, color: COLORS.text }}>{title}</div>
+      {subtitle && <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 1 }}>{subtitle}</div>}
+    </Tag>
+  );
+}
+
+function PersonCard({ image, name, subtitle, onClick }) {
+  const Tag = onClick ? "button" : "div";
+  return (
+    <Tag onClick={onClick} className={onClick ? "cta-card" : undefined} style={onClick ? { ...cardBtnReset, textAlign: "center" } : { textAlign: "center" }}>
+      <div className="cta-card-frame" style={{ borderRadius: "50%", transition: "box-shadow .2s ease" }}>
+        {image ? (
+          <img
+            src={image}
+            alt=""
+            style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", borderRadius: "50%", border: `2px solid ${COLORS.line}`, display: "block" }}
+          />
+        ) : (
+          <div style={{ width: "100%", aspectRatio: "1 / 1", borderRadius: "50%", background: COLORS.panelAlt, border: `2px solid ${COLORS.line}` }} />
+        )}
+      </div>
+      <div style={{ fontSize: 12.5, fontWeight: 600, marginTop: 6, lineHeight: 1.25, color: COLORS.text }}>{name}</div>
+      {subtitle && <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 1 }}>{subtitle}</div>}
+    </Tag>
+  );
+}
+
+function ReviewBlock({ name, image, credits }) {
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        {image ? (
+          <img src={image} alt="" style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover", border: `2px solid ${COLORS.gold}`, boxShadow: `0 0 16px rgba(232,172,61,0.3)` }} />
+        ) : (
+          <div style={{ width: 44, height: 44, borderRadius: "50%", background: COLORS.panelAlt }} />
+        )}
+        <p style={{ fontSize: 16, fontWeight: 700, margin: 0, color: COLORS.text }}>{name}</p>
+      </div>
+      {credits.length === 0 ? (
+        <p style={{ color: COLORS.textMuted, fontSize: 13 }}>No credits found.</p>
+      ) : (
+        <div style={grid}>
+          {credits.map((c) => (
+            <PosterCard key={`${c.mediaType}-${c.id}`} image={c.image} mediaType={c.mediaType} title={c.title} subtitle={c.year} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Loading({ text }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0" }}>
+      <div style={spinner} />
+      <p style={{ color: COLORS.textMuted, fontSize: 14, margin: 0 }}>{text}</p>
+    </div>
+  );
+}
+
+function Footer() {
+  return (
+    <footer style={{ marginTop: 40, paddingTop: 18, borderTop: `1px solid ${COLORS.line}`, textAlign: "center" }}>
+      <p style={{ margin: 0, fontSize: 12, color: COLORS.textMuted, letterSpacing: 0.5 }}>GR Creations 2026</p>
+      <p style={{ margin: "4px 0 0", fontSize: 10.5, color: COLORS.goldDim }}>
+        TMDB — all credits given. This product uses the TMDB API but is not endorsed or certified by TMDB.
+      </p>
+    </footer>
+  );
+}
+
+// ============================================================
+// GAME
+// ============================================================
+
+function ConnectTheActors() {
+  const [phase, setPhase] = useState("idle");
+  const [selectedMode, setSelectedMode] = useState("random");
+  const [selectedDifficulty, setSelectedDifficulty] = useState("normal");
+  const [countdown, setCountdown] = useState(3);
+  const [pair, setPair] = useState(null);
+  const [path, setPath] = useState([]);
+  const [options, setOptions] = useState([]);
+  const [optionSearch, setOptionSearch] = useState("");
+  const [loadingOptions, setLoadingOptions] = useState(false);
+  const [rewindsUsed, setRewindsUsed] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
+  const [finalScore, setFinalScore] = useState(null);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [reviewCredits, setReviewCredits] = useState({ start: [], target: [] });
+  const [reviewSeconds, setReviewSeconds] = useState(15);
+  const [personalBest, setPersonalBest] = useState(null);
+  const [dailyResult, setDailyResult] = useState(null);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [soundOn, setSoundOn] = useState(true);
+  const timerRef = useRef(null);
+  const startTimeRef = useRef(null);
+
+  const stopTimer = useCallback(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = null;
+  }, []);
+
+  useEffect(() => stopTimer, [stopTimer]);
+
+  useEffect(() => {
+    setPersonalBest(getPersonalBest());
+    setDailyResult(loadDailyResult(todayStr()));
+    setSoundOn(loadSoundPref());
+  }, []);
+
+  function play(name) {
+    if (soundOn) SFX[name]();
+  }
+
+  function toggleSound() {
+    setSoundOn((prev) => {
+      const next = !prev;
+      saveSoundPref(next);
+      return next;
+    });
+  }
+
+  async function startGame(mode) {
+    setSelectedMode(mode);
+    setPhase("loading-pair");
+    setErrorMsg("");
+    try {
+      const seed = mode === "daily" ? todayStr() : null;
+      const { pair: newPair, startCredits, targetCredits } = await findValidPair({ seed, difficulty: selectedDifficulty });
+      setPair(newPair);
+      setPath([{ type: "actor", id: newPair.start.id, name: newPair.start.name, image: newPair.start.image }]);
+      setOptions([]);
+      setOptionSearch("");
+      setRewindsUsed(0);
+      setElapsed(0);
+      setFinalScore(null);
+      setReviewCredits({ start: startCredits.slice(0, 8), target: targetCredits.slice(0, 8) });
+      setReviewSeconds(15);
+      setPhase("review");
+    } catch (err) {
+      console.error(err);
+      setErrorMsg(err.message || "Something went wrong fetching data from TMDb.");
+      setPhase("error");
+    }
+  }
+
+  function beginCountdown() {
+    setPhase("countdown");
+    setCountdown(3);
+  }
+
+  useEffect(() => {
+    if (phase !== "review") return;
+    if (reviewSeconds === 0) {
+      beginCountdown();
+      return;
+    }
+    const t = setTimeout(() => setReviewSeconds((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [phase, reviewSeconds]);
+
+  useEffect(() => {
+    if (phase !== "countdown") return;
+    if (countdown === 0) {
+      play("go");
+      setPhase("playing");
+      startTimeRef.current = Date.now();
+      timerRef.current = setInterval(() => {
+        setElapsed((Date.now() - startTimeRef.current) / 1000);
+      }, 100);
+      loadTitleOptions(pair.start.id);
+      return;
+    }
+    play("tick");
+    const t = setTimeout(() => setCountdown((c) => c - 1), 700);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, countdown]);
+
+  async function loadTitleOptions(actorId) {
+    setLoadingOptions(true);
+    setOptionSearch("");
+    const credits = await getActorCredits(actorId, 40);
+    setOptions(credits.map((c) => ({ ...c, kind: "title" })));
+    setLoadingOptions(false);
+  }
+
+  async function loadCastOptions(titleId, mediaType, requiredActorId) {
+    setLoadingOptions(true);
+    setOptionSearch("");
+    const cast = await getCastForTitle(titleId, mediaType, 60, requiredActorId);
+    setOptions(cast.map((a) => ({ ...a, kind: "actor" })));
+    setLoadingOptions(false);
+  }
+
+  async function pickOption(opt) {
+    if (phase !== "playing") return;
+    const newPath = [
+      ...path,
+      { type: opt.kind, id: opt.id, name: opt.name || opt.title, image: opt.image, mediaType: opt.mediaType },
+    ];
+    setPath(newPath);
+
+    if (opt.kind === "actor" && opt.id === pair.target.id) {
+      stopTimer();
+      const secs = (Date.now() - startTimeRef.current) / 1000;
+      const score = computeScore(secs, rewindsUsed, selectedDifficulty);
+      setElapsed(secs);
+      setFinalScore(score);
+      setPhase("won");
+      play("win");
+
+      const entry = {
+        ts: Date.now(),
+        mode: selectedMode,
+        difficulty: selectedDifficulty,
+        score,
+        seconds: secs,
+        rewinds: rewindsUsed,
+        hops: newPath.length - 1,
+        start: pair.start.name,
+        target: pair.target.name,
+      };
+      saveScoreEntry(entry);
+      if (selectedMode === "daily") saveDailyResult(todayStr(), entry);
+      setPersonalBest(getPersonalBest());
+      setDailyResult(loadDailyResult(todayStr()));
+      return;
+    }
+
+    play("click");
+    if (opt.kind === "title") {
+      loadCastOptions(opt.id, opt.mediaType, newPath[newPath.length - 2]?.id);
+    } else {
+      loadTitleOptions(opt.id);
+    }
+  }
+
+  function rewind() {
+    if (phase !== "playing") return;
+    if (path.length <= 1) return;
+    play("rewind");
+    const nextRewinds = rewindsUsed + 1;
+    setRewindsUsed(nextRewinds);
+
+    if (nextRewinds > MAX_REWINDS) {
+      stopTimer();
+      setPhase("lost");
+      play("lose");
+      return;
+    }
+
+    const newPath = path.slice(0, -1);
+    setPath(newPath);
+    const last = newPath[newPath.length - 1];
+    if (last.type === "actor") loadTitleOptions(last.id);
+    else loadCastOptions(last.id, last.mediaType, newPath[newPath.length - 2]?.id);
+  }
+
+  function giveUp() {
+    if (phase !== "playing") return;
+    stopTimer();
+    setPhase("gaveup");
+    play("lose");
+  }
+
+  async function shareResult() {
+    const modeLabel = selectedMode === "daily" ? `Daily - ${todayStr()}` : "Random";
+    const diffLabel = DIFFICULTIES.find((d) => d.id === selectedDifficulty)?.label || "Normal";
+    const text = `Cast Link - ${modeLabel} (${diffLabel})\n${pair.start.name} to ${pair.target.name}\n${elapsed.toFixed(1)}s - ${rewindsUsed} rewind${rewindsUsed !== 1 ? "s" : ""} - ${path.length - 1} hops\n${finalScore} pts`;
+    if (navigator.share) {
+      try {
+        await navigator.share({ text });
+      } catch {}
+      return;
+    }
+    if (navigator.clipboard) {
+      try {
+        await navigator.clipboard.writeText(text);
+        setShareCopied(true);
+        setTimeout(() => setShareCopied(false), 2000);
+      } catch {}
+    }
+  }
+
+  const lastStep = path[path.length - 1];
+  const visibleOptions = optionSearch.trim()
+    ? options.filter((o) => (o.name || o.title || "").toLowerCase().includes(optionSearch.trim().toLowerCase()))
+    : options.slice(0, 18);
+
+  return (
+    <div className="cta-ambient" style={{ background: COLORS.bg, minHeight: "100%", color: COLORS.text, fontFamily: "Inter, system-ui, sans-serif" }}>
+      <style>{GLOBAL_CSS}</style>
+      <div className="cta-content" style={{ maxWidth: 680, margin: "0 auto", padding: "2.25rem 1.25rem 1.5rem" }}>
+        <header style={{ marginBottom: 28, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+            <ClapperIcon />
+            <div>
+              <h1 className="cta-title-glow" style={{ fontFamily: "'Bebas Neue', Inter, sans-serif", fontSize: 40, letterSpacing: 2, margin: 0, lineHeight: 1 }}>
+                CAST LINK
+              </h1>
+              <div style={{ width: 56, height: 3, background: COLORS.gold, margin: "10px 0 10px" }} />
+              {phase === "idle" && (
+                <p style={{ color: COLORS.textMuted, fontSize: 13.5, margin: 0, lineHeight: 1.5, maxWidth: 440 }}>
+                  Connect two actors through the movies and shows they share. Faster time, fewer rewinds, higher score.
+                </p>
+              )}
+            </div>
+          </div>
+          <button onClick={toggleSound} className="cta-btn" style={soundToggleBtn}>
+            Sound: {soundOn ? "On" : "Off"}
+          </button>
+        </header>
+
+        {phase === "idle" && (
+          <div className="cta-fade-in">
+            <p style={sectionLabel}>DIFFICULTY</p>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 22 }}>
+              {DIFFICULTIES.map((d) => (
+                <button
+                  key={d.id}
+                  onClick={() => setSelectedDifficulty(d.id)}
+                  className="cta-btn"
+                  style={selectedDifficulty === d.id ? diffBtnActive : diffBtn}
+                >
+                  {d.label}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 18 }}>
+              <button onClick={() => startGame("random")} className="cta-btn" style={btnPrimary}>
+                Random game
+              </button>
+              <button onClick={() => startGame("daily")} className="cta-btn" style={btnSecondary}>
+                Daily challenge{dailyResult ? " — played today" : ""}
+              </button>
+            </div>
+
+            {dailyResult && (
+              <p style={{ fontSize: 12.5, color: COLORS.textMuted, marginTop: -6, marginBottom: 14 }}>
+                Today's result: {dailyResult.score} pts · {dailyResult.seconds.toFixed(1)}s · {dailyResult.rewinds} rewinds. Playing again won't overwrite it unless you finish another run.
+              </p>
+            )}
+
+            {personalBest && (
+              <p style={{ fontSize: 12.5, color: COLORS.textMuted, marginBottom: 18 }}>
+                Personal best: <b style={{ color: COLORS.gold }}>{personalBest.score} pts</b> ({personalBest.seconds.toFixed(1)}s, {personalBest.rewinds} rewinds)
+              </p>
+            )}
+
+            <div style={panel}>
+              <p style={{ ...sectionLabel, marginBottom: 8 }}>HOW TO PLAY</p>
+              <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: COLORS.textMuted, lineHeight: 1.7 }}>
+                <li>You get two actors — study their filmographies for 15s.</li>
+                <li>Pick a movie/show one actor was in, then someone from its cast, and repeat until you reach the other actor.</li>
+                <li>Wrong turn? Rewind — but it costs points, and 10 rewinds ends the run.</li>
+              </ol>
+            </div>
+          </div>
+        )}
+
+        {phase === "loading-pair" && (
+          <div className="cta-fade-in">
+            <Loading text="Picking a connectable pair…" />
+          </div>
+        )}
+
+        {phase === "error" && (
+          <div className="cta-fade-in" style={panel}>
+            <p style={{ color: COLORS.red, fontWeight: 700, marginBottom: 8 }}>Couldn't load data from TMDb</p>
+            <p style={{ color: COLORS.textMuted, fontSize: 13, fontFamily: "monospace", background: COLORS.panelAlt, padding: "8px 10px", borderRadius: 6 }}>
+              {errorMsg}
+            </p>
+            <button onClick={() => startGame(selectedMode)} className="cta-btn" style={{ ...btnPrimary, marginTop: 14 }}>
+              Retry
+            </button>
+          </div>
+        )}
+
+        {phase === "review" && pair && (
+          <div className="cta-fade-in">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+              <p style={{ fontSize: 13.5, color: COLORS.textMuted, margin: 0 }}>Study their filmographies before you start</p>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span key={reviewSeconds} className="cta-count-pop" style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 26, color: COLORS.gold, letterSpacing: 1 }}>
+                  {reviewSeconds}s
+                </span>
+                <button onClick={beginCountdown} className="cta-btn" style={btnGhost}>
+                  Skip
+                </button>
+              </div>
+            </div>
+            <ReviewBlock name={pair.start.name} image={pair.start.image} credits={reviewCredits.start} />
+            <div className="cta-vs">
+              <span style={{ position: "relative", background: COLORS.bg, padding: "0 12px", fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, color: COLORS.textMuted, letterSpacing: 2 }}>
+                VS
+              </span>
+            </div>
+            <ReviewBlock name={pair.target.name} image={pair.target.image} credits={reviewCredits.target} />
+          </div>
+        )}
+
+        {phase === "countdown" && pair && (
+          <div className="cta-fade-in" style={{ textAlign: "center", padding: "3rem 0" }}>
+            <p style={{ fontSize: 15, marginBottom: 18, color: COLORS.textMuted }}>
+              Connect <b style={{ color: COLORS.text }}>{pair.start.name}</b> to <b style={{ color: COLORS.text }}>{pair.target.name}</b>
+            </p>
+            <div style={{ position: "relative", width: 130, height: 130, margin: "0 auto" }}>
+              <CountdownRing value={countdown} max={3} />
+              <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <span key={countdown} className="cta-count-pop" style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 52, color: COLORS.gold }}>
+                  {countdown === 0 ? "GO" : countdown}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {(phase === "playing" || phase === "won" || phase === "lost" || phase === "gaveup") && pair && (
+          <div className="cta-fade-in">
+            <div style={statBar}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                {pair.target.image ? (
+                  <img src={pair.target.image} alt="" style={{ width: 38, height: 38, borderRadius: "50%", objectFit: "cover" }} />
+                ) : (
+                  <div style={{ width: 38, height: 38, borderRadius: "50%", background: COLORS.panelAlt }} />
+                )}
+                <div>
+                  <span style={statLabel}>Target</span>
+                  <div style={{ fontWeight: 700 }}>{pair.target.name}</div>
+                </div>
+              </div>
+              <div>
+                <span style={statLabel}>Time</span>
+                <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 22, color: COLORS.gold, letterSpacing: 0.5 }}>{elapsed.toFixed(1)}s</div>
+              </div>
+              <div>
+                <span style={statLabel}>Rewinds</span>
+                <div style={{ fontWeight: 700, color: rewindsUsed >= 8 ? COLORS.red : COLORS.text }}>
+                  {rewindsUsed}/{MAX_REWINDS}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, margin: "16px 0" }}>
+              {path.map((p, i) => (
+                <span key={i} className={i === path.length - 1 ? "cta-chip-enter" : undefined} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  {i > 0 && <span style={{ color: COLORS.line }}>›</span>}
+                  <span
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      background: COLORS.panelAlt,
+                      border: `1px solid ${COLORS.line}`,
+                      borderRadius: p.type === "actor" ? 999 : 6,
+                      padding: "4px 10px 4px 4px",
+                      fontSize: 12.5,
+                    }}
+                  >
+                    {p.image && <img src={p.image} alt="" style={{ width: 20, height: 20, borderRadius: p.type === "actor" ? "50%" : 3, objectFit: "cover" }} />}
+                    {p.name}
+                  </span>
+                </span>
+              ))}
+            </div>
+
+            {phase === "playing" && (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
+                  <p style={{ fontSize: 13, color: COLORS.textMuted, margin: 0 }}>
+                    {lastStep.type === "actor" ? "Pick a movie or show:" : "Pick someone from the cast:"}
+                  </p>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={rewind} disabled={path.length <= 1} className="cta-btn" style={btnGhost}>
+                      Rewind
+                    </button>
+                    <button onClick={giveUp} className="cta-btn" style={btnGhostDanger}>
+                      Give up
+                    </button>
+                  </div>
+                </div>
+
+                <input
+                  value={optionSearch}
+                  onChange={(e) => setOptionSearch(e.target.value)}
+                  placeholder={lastStep.type === "actor" ? "Search their filmography…" : "Search the cast…"}
+                  style={searchInput}
+                />
+
+                {loadingOptions ? (
+                  <Loading text="Loading…" />
+                ) : visibleOptions.length === 0 ? (
+                  <p style={{ color: COLORS.textMuted, fontSize: 13 }}>No matches.</p>
+                ) : (
+                  <div style={grid}>
+                    {visibleOptions.map((opt) =>
+                      opt.kind === "title" ? (
+                        <PosterCard
+                          key={`${opt.mediaType}-${opt.id}`}
+                          image={opt.image}
+                          mediaType={opt.mediaType}
+                          title={opt.title}
+                          subtitle={opt.mediaType === "tv" ? `TV · ${opt.year}` : opt.year}
+                          onClick={() => pickOption(opt)}
+                        />
+                      ) : (
+                        <PersonCard key={opt.id} image={opt.image} name={opt.name} subtitle={opt.character} onClick={() => pickOption(opt)} />
+                      )
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+
+            {phase === "won" && (
+              <div style={{ ...panel, textAlign: "center", position: "relative", overflow: "hidden" }}>
+                <ConfettiBurst />
+                <p style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Connected</p>
+                <p style={{ color: COLORS.textMuted, fontSize: 13.5, margin: "6px 0 14px" }}>
+                  {elapsed.toFixed(1)}s · {rewindsUsed} rewind{rewindsUsed !== 1 ? "s" : ""} · {path.length - 1} hops
+                </p>
+                <div className="cta-score-pop" style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 46, color: COLORS.gold, letterSpacing: 1, marginBottom: 18 }}>
+                  {finalScore} PTS
+                </div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+                  <button onClick={() => startGame(selectedMode)} className="cta-btn" style={btnPrimary}>
+                    Play again
+                  </button>
+                  <button onClick={shareResult} className="cta-btn" style={btnSecondary}>
+                    {shareCopied ? "Copied" : "Share result"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {phase === "lost" && (
+              <div style={{ ...panel, textAlign: "center" }}>
+                <p style={{ fontSize: 17, fontWeight: 700, color: COLORS.red, margin: 0 }}>Too many rewinds — game over</p>
+                <button onClick={() => startGame(selectedMode)} className="cta-btn" style={{ ...btnPrimary, marginTop: 16 }}>
+                  Try again
+                </button>
+              </div>
+            )}
+
+            {phase === "gaveup" && (
+              <div style={{ ...panel, textAlign: "center" }}>
+                <p style={{ fontSize: 17, fontWeight: 700, color: COLORS.textMuted, margin: 0 }}>You gave up — no score this round</p>
+                <button onClick={() => startGame(selectedMode)} className="cta-btn" style={{ ...btnPrimary, marginTop: 16 }}>
+                  Try again
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        <Footer />
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// STYLES
+// ============================================================
+
+const grid = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fill, minmax(104px, 1fr))",
+  gap: 14,
+};
+
+const cardBtnReset = {
+  background: "none",
+  border: "none",
+  padding: 0,
+  cursor: "pointer",
+  font: "inherit",
+  color: "inherit",
+  width: "100%",
+};
+
+const panel = {
+  background: `linear-gradient(180deg, ${COLORS.panel}, ${COLORS.panelAlt})`,
+  border: `1px solid ${COLORS.line}`,
+  borderRadius: 12,
+  padding: "22px 20px",
+};
+
+const statBar = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  background: `linear-gradient(180deg, ${COLORS.panel}, ${COLORS.panelAlt})`,
+  border: `1px solid ${COLORS.line}`,
+  borderRadius: 12,
+  padding: "13px 18px",
+};
+
+const statLabel = { fontSize: 10.5, color: COLORS.textMuted, letterSpacing: 0.5 };
+
+const sectionLabel = { fontSize: 12.5, fontWeight: 700, color: COLORS.textMuted, letterSpacing: 0.5, margin: "0 0 8px" };
+
+const btnPrimary = {
+  background: `linear-gradient(180deg, #F0BD57, ${COLORS.gold})`,
+  color: "#1B1608",
+  border: "none",
+  borderRadius: 999,
+  padding: "13px 22px",
+  fontSize: 14.5,
+  fontWeight: 700,
+  cursor: "pointer",
+  boxShadow: "0 4px 14px rgba(232,172,61,0.25)",
+};
+
+const btnSecondary = {
+  background: COLORS.panelAlt,
+  color: COLORS.text,
+  border: `1px solid ${COLORS.line}`,
+  borderRadius: 999,
+  padding: "13px 22px",
+  fontSize: 14.5,
+  fontWeight: 600,
+  cursor: "pointer",
+};
+
+const btnGhost = {
+  background: "transparent",
+  border: `1px solid ${COLORS.line}`,
+  color: COLORS.textMuted,
+  borderRadius: 999,
+  padding: "6px 14px",
+  fontSize: 12.5,
+  cursor: "pointer",
+};
+
+const btnGhostDanger = { ...btnGhost, color: COLORS.red, borderColor: COLORS.red };
+
+const soundToggleBtn = { ...btnGhost, flexShrink: 0 };
+
+const diffBtn = {
+  background: COLORS.panelAlt,
+  border: `1px solid ${COLORS.line}`,
+  color: COLORS.textMuted,
+  borderRadius: 8,
+  padding: "8px 14px",
+  fontSize: 13,
+  fontWeight: 600,
+  cursor: "pointer",
+};
+
+const diffBtnActive = { ...diffBtn, background: COLORS.gold, color: "#1B1608", borderColor: COLORS.gold, boxShadow: "0 2px 10px rgba(232,172,61,0.3)" };
+
+const searchInput = {
+  width: "100%",
+  boxSizing: "border-box",
+  background: COLORS.panelAlt,
+  border: `1px solid ${COLORS.line}`,
+  color: COLORS.text,
+  borderRadius: 8,
+  padding: "10px 12px",
+  fontSize: 13.5,
+  marginBottom: 12,
+  outline: "none",
+};
+
+const spinner = {
+  width: 16,
+  height: 16,
+  borderRadius: "50%",
+  border: `2px solid ${COLORS.line}`,
+  borderTopColor: COLORS.gold,
+  animation: "cta-spin 0.7s linear infinite",
+};
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<ConnectTheActors />);
+</script>
+</body>
+</html>
